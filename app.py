@@ -1,102 +1,127 @@
 import streamlit as st
 import pandas as pd
-from prophet import Prophet
-import plotly.graph_objects as go
+import numpy as np
+import matplotlib.pyplot as plt
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from xgboost import XGBRegressor
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
 
-st.set_page_config(page_title="Sales Forecast", layout="wide")
-st.title("📊 Business Development: Sales Forecasting & Inventory Planner")
-
-# 1. File Upload - CSV or Excel
-uploaded_file = st.file_uploader("Mee Sales file upload cheyandi - CSV or Excel", 
-                                 type=["csv", "xlsx", "xls"])
+# -------------------------------
+# Sidebar: Upload Data
+# -------------------------------
+st.sidebar.title("Upload Sales Data")
+uploaded_file = st.sidebar.file_uploader("Upload CSV with 'date' and 'sales' columns", type="csv")
 
 if uploaded_file:
-    try:
-        # 2. File type batti read chey
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
-        
-        st.success(f"File loaded: {uploaded_file.name}")
-        st.write("Data Preview:", df.head())
-        
-        # 3. Columns select - Auto guess kuda chestadi
-        cols = df.columns.tolist()
-        
-        # Date column auto guess
-        date_guess = None
-        for col in cols:
-            if 'date' in col.lower() or 'day' in col.lower():
-                date_guess = col
-                break
-        
-        # Sales column auto guess  
-        sales_guess = None
-        for col in cols:
-            if 'sale' in col.lower() or 'revenue' in col.lower() or 'amount' in col.lower():
-                sales_guess = col
-                break
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            date_col = st.selectbox("Date Column select chey", cols, 
-                                    index=cols.index(date_guess) if date_guess else 0)
-        with col2:
-            sales_col = st.selectbox("Sales Column select chey", cols, 
-                                     index=cols.index(sales_guess) if sales_guess else 0)
-        
-        # 4. Prophet kosam prepare chey - Error proof
-        df_prophet = df[[date_col, sales_col]].copy()
-        df_prophet.columns = ['ds', 'y']
-        
-        # Date convert chey - format edaina handle avutadi
-        df_prophet['ds'] = pd.to_datetime(df_prophet['ds'], errors='coerce')
-        df_prophet['y'] = pd.to_numeric(df_prophet['y'], errors='coerce')
-        
-        # Nulls teesey
-        df_prophet = df_prophet.dropna()
-        
-        if df_prophet.empty:
-            st.error("Date or Sales column lo data sarigga ledu. Check cheyandi.")
-        else:
-            # 5. Model train chey
-            model = Prophet(yearly_seasonality=True, weekly_seasonality=True)
-            model.add_country_holidays(country_name='IN')
-            model.fit(df_prophet)
-            
-            # 6. Forecast chey
-            periods = st.slider("Enni rojulu forecast kavali?", 7, 365, 90)
-            future = model.make_future_dataframe(periods=periods)
-            forecast = model.predict(future)
-            
-            # 7. Output chupinchu
-            st.subheader("Forecast Results")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], name='Forecast'))
-            fig.add_trace(go.Scatter(x=df_prophet['ds'], y=df_prophet['y'], name='Actual'))
-            st.plotly_chart(fig, use_container_width=True)
-            
-            st.write("Next 10 days forecast:", forecast[['ds', 'yhat']].tail(10))
-            st.download_button("Download Forecast CSV", 
-                               forecast.to_csv(index=False), 
-                               file_name="forecast.csv")
-            
-    except Exception as e:
-        st.error(f"Error: {e}")
-        st.info("CSV/Excel lo 'Date' and 'Sales' columns unnaya check cheyandi")
-        
+    data = pd.read_csv(uploaded_file, parse_dates=["date"], index_col="date")
+    st.write("### Raw Data Preview")
+    st.write(data.head())
+
+    # Resample monthly
+    monthly_sales = data["sales"].resample("M").sum()
+
+    # -------------------------------
+    # Train-Test Split
+    # -------------------------------
+    train_size = int(len(monthly_sales) * 0.8)
+    train, test = monthly_sales[:train_size], monthly_sales[train_size:]
+
+    st.write("### Monthly Sales Trend")
+    st.line_chart(monthly_sales)
+
+    # -------------------------------
+    # ARIMA Forecast
+    # -------------------------------
+    st.subheader("ARIMA Forecast")
+    model = ARIMA(train, order=(2,1,2))
+    model_fit = model.fit()
+    forecast = model_fit.forecast(steps=len(test))
+
+    mae = mean_absolute_error(test, forecast)
+    rmse = np.sqrt(mean_squared_error(test, forecast))
+    st.write(f"**ARIMA MAE:** {mae:.2f}, **RMSE:** {rmse:.2f}")
+
+    fig, ax = plt.subplots()
+    ax.plot(train, label="Train")
+    ax.plot(test, label="Test")
+    ax.plot(test.index, forecast, label="Forecast")
+    ax.legend()
+    st.pyplot(fig)
+
+    # -------------------------------
+    # XGBoost Forecast
+    # -------------------------------
+    st.subheader("XGBoost Forecast")
+    df = monthly_sales.reset_index()
+    df["month"] = df["date"].dt.month
+    df["year"] = df["date"].dt.year
+    df["lag1"] = df["sales"].shift(1)
+    df["lag2"] = df["sales"].shift(2)
+    df = df.dropna()
+
+    train_size = int(len(df) * 0.8)
+    train_df, test_df = df[:train_size], df[train_size:]
+
+    X_train, y_train = train_df.drop(["sales","date"], axis=1), train_df["sales"]
+    X_test, y_test = test_df.drop(["sales","date"], axis=1), test_df["sales"]
+
+    xgb = XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5)
+    xgb.fit(X_train, y_train)
+    y_pred = xgb.predict(X_test)
+
+    mae = mean_absolute_error(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    st.write(f"**XGBoost MAE:** {mae:.2f}, **RMSE:** {rmse:.2f}")
+
+    fig, ax = plt.subplots()
+    ax.plot(y_test.values, label="Test")
+    ax.plot(y_pred, label="Prediction")
+    ax.legend()
+    st.pyplot(fig)
+
+    # -------------------------------
+    # LSTM Forecast
+    # -------------------------------
+    st.subheader("LSTM Forecast")
+
+    def create_sequences(series, window_size=12):
+        X, y = [], []
+        for i in range(len(series) - window_size):
+            X.append(series[i:i+window_size])
+            y.append(series[i+window_size])
+        return np.array(X), np.array(y)
+
+    series = monthly_sales.values
+    X, y = create_sequences(series)
+
+    train_size = int(len(X) * 0.8)
+    X_train, y_train = X[:train_size], y[:train_size]
+    X_test, y_test = X[train_size:], y[train_size:]
+
+    X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
+    X_test = X_test.reshape((X_test.shape[0], X_test.shape[1], 1))
+
+    model = Sequential([
+        LSTM(50, activation="relu", input_shape=(X_train.shape[1], 1)),
+        Dense(1)
+    ])
+    model.compile(optimizer="adam", loss="mse")
+    model.fit(X_train, y_train, epochs=20, verbose=0)
+
+    y_pred = model.predict(X_test)
+
+    mae = mean_absolute_error(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    st.write(f"**LSTM MAE:** {mae:.2f}, **RMSE:** {rmse:.2f}")
+
+    fig, ax = plt.subplots()
+    ax.plot(y_test, label="Test")
+    ax.plot(y_pred, label="Prediction")
+    ax.legend()
+    st.pyplot(fig)
+
 else:
-    st.info("👆 Painna CSV or Excel file upload cheyandi")
-# Forecast table kindha ee code petti
-st.subheader("📦 Inventory Planner")
-safety_stock = st.number_input("Safety Stock %", 10, 50, 20)
-lead_time = st.number_input("Supplier Lead Time - Days", 1, 30, 7)
-
-avg_daily_sales = forecast['yhat'].tail(30).mean()
-reorder_point = avg_daily_sales * lead_time * (1 + safety_stock/100)
-
-st.metric("Daily Avg Sales", f"{avg_daily_sales:.0f} units")
-st.metric("Reorder Point", f"{reorder_point:.0f} units")
-st.warning(f"Stock {reorder_point:.0f} kanna takkuva ayithe malli order pettu")
-    
+    st.info("Please upload a CSV file to start.")
