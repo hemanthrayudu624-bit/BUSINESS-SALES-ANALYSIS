@@ -122,6 +122,3 @@ if uploaded_file:
     ax.plot(y_pred, label="Prediction")
     ax.legend()
     st.pyplot(fig)
-
-else:
-    st.info("Please upload a CSV file to start.")
